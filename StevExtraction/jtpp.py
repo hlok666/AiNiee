@@ -7,7 +7,7 @@ import openpyxl
 from chardet import detect
 import csv
 
-version = 'v2.16'
+version = 'v2.20'
 
 csv.field_size_limit(2**30)
 pd.options.display.max_colwidth = None
@@ -28,18 +28,12 @@ class Jr_Tpp():
         self.sumcode = config['sumcode']
         self.line_length = config['line_length']
         self.note_percent = config['note_percent']
-        self.rule = config['rule'].replace('。', '\'')
-        self.battlelog_code=['655','355']
-        self.code355 = False
-        self.code655 = False
-        # 把355从readcode中剔除
-        if '355' in self.ReadCode:
-            self.ReadCode.remove('355')
-            self.code355 = True
-        # 把655从readcode中剔除
-        if '655' in self.ReadCode:
-            self.ReadCode.remove('655')
-            self.code655 = True
+
+        #读取sptext并把正则表达式中的。换为单引号
+        self.sptext=config['sptext']
+        for key in self.sptext:
+            for mark in self.sptext[key]:
+                self.sptext[key][mark]=self.sptext[key][mark].replace('。', '\'')
         # 每次加载config都重置
         self.__tempdata = ['原文', '译文', '地址', '标签', 'code']  # 用于记录上一行文本的数据
         self.__sumlen = 0  # code相同的文本行数
@@ -49,6 +43,7 @@ class Jr_Tpp():
     def __init__(self,config:dict,path:str=False):
         self.ProgramData= {} # 翻译工程数据,键为文件名，值为DataFrame，列为['原文','译文','地址','标签']，同时设置原文为索引
         self.ApplyConfig(config)
+        self.AutoLineFeed_jsdir='自动换行.js'
         if path:
             self.load(path) # 从工程文件加载
 
@@ -85,7 +80,7 @@ class Jr_Tpp():
             print(e)
             print('请关闭所有xlsx文件再试')
     # 用openpyxl写xlsx，默认只导出原文和译文列
-    def __Writexlsx(self,df,name,full=False):
+    def __Writexlsx(self,df,name,full=False,output_black=True):
         # 创建一个Excel工作簿
         workbook = openpyxl.Workbook()
         # 获取默认的工作表
@@ -100,8 +95,9 @@ class Jr_Tpp():
         sheet.append(header_row)
         # 将DataFrame的数据写入工作表
         for index, row in df.iterrows():
-            data_row = [row[column] for column in columns_to_export]
-            sheet.append(data_row)
+            if (not self.__IfBlackDir(row['地址']) and row['code'] not in self.BlackCode) or output_black:
+                data_row = [row[column] for column in columns_to_export]
+                sheet.append(data_row)
         # 将单元格格式设置为文本格式
         for column_cells in sheet.columns:
             for cell in column_cells:
@@ -115,11 +111,11 @@ class Jr_Tpp():
         # 保存工作簿为xlsx文件
         workbook.save(name)
     # 读取code355(655)，且脚本中含有addText的文本,仅适用于日文游戏
-    def __ReadCode355_addText(self,data:str,Dir,code) -> list:
+    def __GetSptext(self,data:str,Dir,code,rule) -> list:
         res=[]
         Dir+='\u200B' + '1'
         if self.ja:
-            data=re.sub(self.rule,'☆↑↓←→',data).split('☆↑↓←→')
+            data=re.findall(rule,data)
             for i in data:
                 if re.search('[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fa5ー々〆〤]',i):
                     res.append([i,'',Dir,'',code])
@@ -144,54 +140,58 @@ class Jr_Tpp():
                 code = '-1'
             else:
                 code = str(code)
-            # 读取code355,655中可翻译部分
-            if code in self.battlelog_code and '\'addText\'' in data and ((code == '355' and self.code355) or (code == '655' and self.code655)):
-                [res.append(x) for x in self.__ReadCode355_addText(data, FileName,code)]
-            # 是需要添加的字符串，而且含中日字符(System.json\gameTitle不论是否含中日字符，都进
-            if (not self.ja or re.search(r'[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fa5ー々〆〤]', data)
-                    or r'System.json\gameTitle' in FileName):
-                if r'System.json\gameTitle' in FileName and data == '': data = ' '  # 游戏名为空时，变为空格，否则会报错
-                # 这一行的文本数据,0原文,1译文,2地址,3标签,4code
-                textdata = [data, '', FileName, '', code]
-                # 当code和上次的一样,或者上次是108，这次是408，而且是需要文本求和的code时
-                if (code == self.__tempdata[4] or (self.__tempdata[4] == '108' and code == '408')) and code in self.sumcode:
-                    self.__tempdata[0] += '\n' + textdata[0]
-                    self.__sumlen += 1
-                # 当code和上一次的code不相等时，正常存储
+            # code是特殊文本的code，则对对应的dict的key（mark）遍历，如果mark在未翻译文本中，按照mark对应的正则表达式提取文本
+            if code in self.sptext.keys():
+                for mark in self.sptext[code].keys():
+                    if mark in data or mark=='空':
+                        rule=self.sptext[code][mark]
+                        [res.append(x) for x in self.__GetSptext(data, FileName, code,rule)]
+            else:
+                # 是需要添加的字符串，而且含中日字符(System.json\gameTitle不论是否含中日字符，都进
+                if (not self.ja or re.search(r'[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fa5ー々〆〤]', data)
+                        or r'System.json\gameTitle' in FileName):
+                    if r'System.json\gameTitle' in FileName and data == '': data = ' '  # 游戏名为空时，变为空格，否则会报错
+                    # 这一行的文本数据,0原文,1译文,2地址,3标签,4code
+                    textdata = [data, '', FileName, '', code]
+                    # 当code和上次的一样,或者上次是108，这次是408，而且是需要文本求和的code时
+                    if (code == self.__tempdata[4] or (self.__tempdata[4] == '108' and code == '408')) and code in self.sumcode:
+                        self.__tempdata[0] += '\n' + textdata[0]
+                        self.__sumlen += 1
+                    # 当code和上一次的code不相等时，正常存储
+                    else:
+                        if self.__sumlen:
+                            self.__tempdata[2] += '\u200B' + str(self.__sumlen)  # 在地址后面加上一个零宽空格后加上求和长度
+                            if self.__tempdata[0]!='':
+                                res.append(self.__tempdata)
+                        # 只有特定code才读取,readcode为空时，全读
+                        if (code in self.ReadCode or len(self.ReadCode) == 0):
+                            # res.append(textdata)
+                            # 更新tempcode并初始化sumlen
+                            self.__tempdata = textdata
+                            self.__sumlen = 1
+                        else:
+                            # 初始化tempcode和sumlen
+                            self.__tempdata = ['原文', '译文', '地址', '标签', 'code']
+                            self.__sumlen = 0
+                # 不是需要添加的字符串，单独判断是否中断文本求和
                 else:
-                    if self.__sumlen:
-                        self.__tempdata[2] += '\u200B' + str(self.__sumlen)  # 在地址后面加上一个零宽空格后加上求和长度
-                        if self.__tempdata[0]!='':
+                    # code仍符合需求，并且data是字符串，则原原本本地添加进来
+                    if (code == self.__tempdata[4] or (
+                            self.__tempdata[4] == '108' and code == '408')) and code in self.sumcode:
+                        self.__tempdata[0] += '\n' + data
+                        self.__sumlen += 1
+                    # 否则中断文本求和
+                    elif self.__sumlen:
+                        self.__tempdata[2] += '\u200B' + str(self.__sumlen)  # 求和的文本行，在地址后面加上一个零宽空格后加上求和长度
+                        if self.__tempdata[0] != '':
                             res.append(self.__tempdata)
-                    # 只有特定code才读取,readcode为空时，全读
-                    if (code in self.ReadCode or len(self.ReadCode) == 0):
-                        # res.append(textdata)
-                        # 更新tempcode并初始化sumlen
-                        self.__tempdata = textdata
-                        self.__sumlen = 1
+                        # 初始化tempcode和sumlen
+                        self.__tempdata = ['原文', '译文', '地址', '标签', 'code']
+                        self.__sumlen = 0
                     else:
                         # 初始化tempcode和sumlen
                         self.__tempdata = ['原文', '译文', '地址', '标签', 'code']
                         self.__sumlen = 0
-            # 不是需要添加的字符串，单独判断是否中断文本求和
-            else:
-                # code仍符合需求，并且data是字符串，则原原本本地添加进来
-                if (code == self.__tempdata[4] or (
-                        self.__tempdata[4] == '108' and code == '408')) and code in self.sumcode:
-                    self.__tempdata[0] += '\n' + data
-                    self.__sumlen += 1
-                # 否则中断文本求和
-                elif self.__sumlen:
-                    self.__tempdata[2] += '\u200B' + str(self.__sumlen)  # 求和的文本行，在地址后面加上一个零宽空格后加上求和长度
-                    if self.__tempdata[0] != '':
-                        res.append(self.__tempdata)
-                    # 初始化tempcode和sumlen
-                    self.__tempdata = ['原文', '译文', '地址', '标签', 'code']
-                    self.__sumlen = 0
-                else:
-                    # 初始化tempcode和sumlen
-                    self.__tempdata = ['原文', '译文', '地址', '标签', 'code']
-                    self.__sumlen = 0
 
         return res
     # 读取文件夹路径，返回包括其子文件夹内的所有文件名
@@ -272,8 +272,10 @@ class Jr_Tpp():
             data[Dir[0]]=self.__WriteFile(data[Dir[0]],untrs,trsed,Dir[1:],length,code,key_is_list=key_is_list)
         elif type(data)==str and len(Dir)==0:
             # 写code355,655
-            if code in self.battlelog_code and '\'addText\'' in data and ((code == '355' and self.code355) or (code == '655' and self.code655)):
-                data=data.replace(untrs,trsed)
+            if code in self.sptext.keys():
+                for mark in self.sptext[code].keys():
+                    if mark in data or mark=='空':
+                        data = data.replace(untrs, trsed)
             else:
                 data = trsed
         return data
@@ -429,14 +431,14 @@ class Jr_Tpp():
                 if not os.path.exists(path): os.mkdir(path)
         return path
     # 导出单个文件，默认只导出原文和译文列
-    def ToXlsx(self,name:str,path:str):
+    def ToXlsx(self,name:str,path:str,output_black=True):
         self.__makedir(name,path)
         # 文件名后缀改为xlsx
         outputname = self.__nameswitch(name)
         print(f'正在导出{outputname}')
         data=self.ProgramData[name]
         try:
-            self.__Writexlsx(data,path + '\\' + outputname)
+            self.__Writexlsx(data,path + '\\' + outputname,output_black=output_black)
         except Exception as e:
             print(traceback.format_exc())
             print(e)
@@ -458,7 +460,7 @@ class Jr_Tpp():
     def Output(self,path:str):
         if not os.path.exists(path+'\\data'): os.mkdir(path+'\\data')
         for name in self.ProgramData.keys():
-            self.ToXlsx(name,path+'\\data')
+            self.ToXlsx(name,path+'\\data',output_black=False)
         print('########################导出完成########################')
     # 保存工程文件，数据保存为csv，设置保存为json
     def Save(self,path:str):
@@ -610,7 +612,7 @@ class Jr_Tpp():
                 print(f'{key}不再目标范围内')
     # 按条件搜索，col是按搜索目标，0原文，1译文，2地址，3标签，4code。搜索条件为按*分割,target和返回值格式同ProgramData,notin为True，则搜索不含搜索目标的
     # BigSmall为true则不区分大小写
-    def search(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False) ->dict:
+    def search(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,regex=True) ->dict:
         if col == 0:col = '原文'
         elif col == 1:col = '译文'
         elif col == 2:col = '地址'
@@ -630,18 +632,18 @@ class Jr_Tpp():
                 else:
                     # 根据是否反选，返回搜索结果
                     if notin:
-                        temp=DataFrame[~DataFrame[col].str.contains(string,case=not BigSmall,regex=True)]
+                        temp=DataFrame[~DataFrame[col].str.contains(string,case=not BigSmall,regex=regex)]
                     else:
-                        temp = DataFrame[DataFrame[col].str.contains(string,case=not BigSmall,regex=True)]
+                        temp = DataFrame[DataFrame[col].str.contains(string,case=not BigSmall,regex=regex)]
                 if len(list(temp.index)):
                     res.update({name:temp})
         return res
     # 搜索含A但不含B的，默认colB=colA
-    def DoubleSearch(self,A:str,B:str,colA:int,colB:int=False,target:dict=False,namelist:list=False,BigSmall=False):
-        res=self.search(A,colA,target,namelist,notin=False,BigSmall=BigSmall)
+    def DoubleSearch(self,A:str,B:str,colA:int,colB:int=False,target:dict=False,namelist:list=False,BigSmall=False,regex=True):
+        res=self.search(A,colA,target,namelist,notin=False,BigSmall=BigSmall,regex=regex)
         if not colB:
             colB=colA
-        return self.search(B,colB,res,namelist,True,BigSmall)
+        return self.search(B,colB,res,namelist,True,BigSmall,regex)
     # 替换,只能替换译文列
     def Replace(self,before:str,after:str,target:dict=False,namelist:list=False):
         if not target:
@@ -654,8 +656,8 @@ class Jr_Tpp():
                 target[name].loc[index,'译文']=target[name].loc[index,'译文'].replace(before,after)
         return target
     # 根据搜索结果增减标签,add为True，添加标签,返回搜索结果
-    def LabelBySearch(self,string:str,col:int,label:str,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,add=True):
-        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall)
+    def LabelBySearch(self,string:str,col:int,label:str,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,add=True,regex=True):
+        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall,regex=regex)
         if len(res)>0:
             target={}
             for name in res.keys():
@@ -668,16 +670,16 @@ class Jr_Tpp():
             print('搜索结果为空')
         return res
     # 输出搜索结果,返回搜索结果
-    def DisplayBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False):
-        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall)
+    def DisplayBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,regex=True):
+        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall,regex=regex)
         if len(res)>0:
             self.Display(res)
         else:
             print('搜索结果为空')
         return res
     # 将搜索结果导出到当前目录的单个xlsx中,返回搜索结果,默认只导出原文和译文
-    def OutputBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,OutputName:str='SearchRes.xlsx',full=False):
-        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall)
+    def OutputBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,OutputName:str='SearchRes.xlsx',full=False,regex=True):
+        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall,regex=regex)
         if len (res):
             output=pd.concat(list(res.values()),axis=0)
             self.__Writexlsx(output,OutputName,full)
@@ -686,8 +688,8 @@ class Jr_Tpp():
             print('搜索结果为空')
         return res
     # 将搜索结果导出到当前目录的单个json文件中,返回json数据,搜索为空则返回空df
-    def JsonBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,OutputName:str='SearchRes.json'):
-        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall)
+    def JsonBySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,OutputName:str='SearchRes.json',regex=True):
+        res=self.search(string,col,target=target,namelist=namelist,notin=notin,BigSmall=BigSmall,regex=regex)
         if len(res):
             res = pd.concat(list(res.values()), axis=0)
             output=dict(zip(res['原文'],res['译文'].fillna('')))
@@ -742,15 +744,15 @@ class Jr_Tpp():
         if without:
             # 从target中依次除外without
             for i in without:
-                target=self.search(i,2,target=target,notin=True)
+                target=self.search(i,2,target=target,notin=True,regex=False)
         # 对剩下的标签'Name',不区分大小写搜索
-        self.LabelBySearch('name',2,'Name',target=target,BigSmall=True)
+        self.LabelBySearch('name',2,'Name',target=target,BigSmall=True,regex=False)
     # 对名字标签并导出json文件
     def GetName(self,data_path,without:list=False):
         path=data_path+'\\name'
         self.LabelName(without)
         if not os.path.exists(path): os.mkdir(path)
-        namedict=self.JsonBySearch('Name',3,OutputName=path+r'\Name.json')
+        namedict=self.JsonBySearch('Name',3,OutputName=path+r'\Name.json',regex=False)
         if self.ja:
             splited_name={}
             for name in namedict.keys():
@@ -775,8 +777,8 @@ class Jr_Tpp():
                         self.ProgramData[name].loc[index,'译文']=index
         print('应用原文完成')
     # 对搜索结果应用原文
-    def ApplyUntrs_BySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False):
-        res = self.search(string, col, target=target, namelist=namelist, notin=notin, BigSmall=BigSmall)
+    def ApplyUntrs_BySearch(self,string:str,col:int,target:dict=False,namelist:list=False,notin:bool=False,BigSmall=False,regex=True):
+        res = self.search(string, col, target=target, namelist=namelist, notin=notin, BigSmall=BigSmall,regex=regex)
         if len(res)>0:
             self.ApplyUntrs(res)
         else:
@@ -900,6 +902,41 @@ class Jr_Tpp():
                 DataFrame.loc[index,'译文']= res.rstrip('\n')
             self.ProgramData[name]=DataFrame
         print('########################已按每行{}字自动换行########################'.format(linelength))
+    # 插件版自动换行
+    def AutoLineFeed_js(self,GameDir):
+        dirlist = self.__ReadFolder(GameDir)
+        # 定位到plugins.js文件，并取得plugins文件夹地址
+        for fdir in dirlist:
+            if fdir.endswith('plugins.js') and '\\js\\' in fdir:
+                pgsdir = fdir
+                pgsfolder = pgsdir.rstrip('plugins.js') + 'plugins\\'
+                break
+        with open(pgsdir, 'rb') as f:
+            encoding = detect(f.read())['encoding']
+            if encoding == None:
+                encoding = 'ansi'
+        with open(pgsdir, 'r', encoding=encoding) as f:
+            plugins_js = f.read()
+        # 修改plugins.js文件，在插件列表添加AutoLineFeed.js
+        temp0 = 'plugins =\n[\n'
+        body = plugins_js.split(temp0)
+        addline='{"name":"自动换行","status":true,"description":"auto linefeed","parameters":{}},\n'
+        if addline not in body[1]:
+            body[1] = addline + body[1]
+        plugins_js = body[0] + temp0 + body[1]
+        # 直接覆盖原文件
+        with open(pgsdir, 'w', encoding=encoding) as f:
+            f.write(plugins_js)
+        # 读取自动换行.js，然后在游戏插件目录写入一份（用cp命令可能会报错
+        with open(self.AutoLineFeed_jsdir, 'rb') as f:
+            encoding = detect(f.read())['encoding']
+            if encoding == None:
+                encoding = 'ansi'
+        with open(self.AutoLineFeed_jsdir, 'r', encoding=encoding) as f:
+            jscode = f.read()
+        with open(pgsfolder + '自动换行.js', 'w', encoding=encoding) as f:
+            f.write(jscode)
+        print('已将自动换行插件复制到游戏插件目录，如果出现bug，请自行修改plugins.js文件\n 将自动换行那一行删掉')
     # 核对原文译文中，文本出现次数，若不同，单独导出。只导出原文至少出现一次的。需要一个名为checkdict.json的检查字典，格式为
     #{"要检查的原文":"对应的译文"}
     def checknum(self):
@@ -992,7 +1029,7 @@ class Jr_Tpp():
     # 这类文本被翻译，通常会导致图鉴等不显示
     def DNoteB(self):
         print('正在处理可能存在的note问题')
-        res=self.search('note',2)
+        res=self.search('note',2,regex=False)
         for name in res.keys():
             DataFrame=res[name]
             for untrs in DataFrame.index:
@@ -1019,6 +1056,10 @@ class Jr_Tpp():
                             # 对长度足够长的文本，只替换冒号前的内容
                             if ((untrs_code.find(':') - untrs_code.find('<')) / jalen)< self.note_percent:
                                 l = ['<', ':']  #分隔符
+                                a=untrs_code.count(l[0])
+                                b=trsed_code.count(l[0])
+                                c=untrs_code.count(l[1])
+                                d=trsed_code.count(l[1])
                                 if untrs_code.count(l[0]) == trsed_code.count(l[0]) and untrs_code.count(l[1]) == trsed_code.count(l[1]):
                                     # 将文本按照分隔符拆分
                                     untrs_code_list = self.__splitbychar(untrs_code, l)
@@ -1066,11 +1107,13 @@ class Jr_Tpp():
         self.InputFromeXlsx(path)
         self.dnb(GameDir)
         self.DNoteB()
-        if self.line_length:
+        if self.line_length and self.line_length!=-1:
             self.AutoLineFeed(self.line_length)
         if mark:
             self.AddMark(mark)
         self.InjectGame(GameDir,OutputPath)
+        if self.line_length==-1:
+            self.AutoLineFeed_js(GameDir)
     # 游戏版本更新，path是旧版翻译文件的路径
     def Update(self,GameDir,path,save_path,data_path):
         self.ReadGame(GameDir)

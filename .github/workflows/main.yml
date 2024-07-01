@@ -20,7 +20,7 @@ jobs:
       - name: Install PyInstaller
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller openai cohere zhipuai anthropic numpy openpyxl PyQt5 "PyQt-Fluent-Widgets[full]" opencc tiktoken google-generativeai ebooklib beautifulsoup4 pandas chardet PyYAML 
+          pip install pyinstaller openai cohere anthropic numpy openpyxl PyQt5 "PyQt-Fluent-Widgets[full]" opencc tiktoken google-generativeai ebooklib beautifulsoup4 pandas chardet PyYAML 
 
       - name: Modify opencc
         run: |
@@ -36,6 +36,7 @@ jobs:
           Copy-Item -Path "$clibPath" -Destination "dist\clib" -Recurse -Force
           Copy-Item -Path "resource" -Destination "dist\resource" -Recurse -Force
           Copy-Item -Path "StevExtraction" -Destination "dist\StevExtraction" -Recurse -Force
+          Copy-Item -Path "SakuraLLMScript" -Destination "dist\SakuraLLMScript" -Recurse -Force
           Compress-Archive -Path "dist" -DestinationPath "AiNiee-Beta.zip"
           
       - name: Delete release
